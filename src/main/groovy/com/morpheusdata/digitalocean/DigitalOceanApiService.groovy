@@ -147,13 +147,14 @@ class DigitalOceanApiService {
 	ServiceResponse listDropletSizes(String apiKey) {
 		ServiceResponse rtn = ServiceResponse.prepare()
 		String apiPath = "/v2/sizes"
-		ServiceResponse response = internalGetApiRequest(apiKey, apiPath)
+		ServiceResponse response = internalPaginatedGetApiRequest(apiKey, apiPath, "sizes")
 		if(response.success) {
 			rtn.success = true
 			rtn.data = response.data.sizes
 			rtn.results = response.data
 		} else {
-
+			rtn.errorCode = response.errorCode
+			rtn.results = response.data
 		}
 
 		return rtn
