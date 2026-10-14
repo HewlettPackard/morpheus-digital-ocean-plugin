@@ -4,7 +4,14 @@ import com.morpheusdata.digitalocean.DigitalOceanApiService
 import com.morpheusdata.digitalocean.DigitalOceanPlugin
 import com.morpheusdata.digitalocean.cloud.DigitalOceanCloudProvider
 import com.morpheusdata.core.MorpheusContext
+import com.morpheusdata.core.BulkRemoveResult
+import com.morpheusdata.core.MorpheusAsyncServices
+import com.morpheusdata.core.MorpheusServicePlanPriceSetService
 import com.morpheusdata.core.MorpheusServicePlanService
+import com.morpheusdata.core.MorpheusServices
+import com.morpheusdata.core.synchronous.MorpheusSynchronousServicePlanPriceSetService
+import com.morpheusdata.core.synchronous.MorpheusSynchronousServicePlanService
+import com.morpheusdata.model.ServicePlanPriceSet
 import com.morpheusdata.core.MorpheusVirtualImageService
 import com.morpheusdata.core.Plugin
 import com.morpheusdata.model.Cloud
@@ -93,6 +100,95 @@ class SizesSyncSpec extends Specification {
 		1 * servicePlanContext.create({ list -> list.size() == 1 && list.first().externalId == createPlan.externalId }) >> Single.just(true)
 		1 * servicePlanContext.save([updatePlan]) >> Single.just([updatePlan])
 		1 * servicePlanContext.remove({ list -> list.size() == 1 && list.first().externalId == removePlan.externalId })
+	}
+
+	void "cleanDuplicates keeps the lowest id per code and deactivates copies that cannot be removed"() {
+		given:
+		MorpheusContext context = Mock(MorpheusContext)
+		MorpheusServices services = Mock(MorpheusServices)
+		MorpheusAsyncServices async = Mock(MorpheusAsyncServices)
+		MorpheusSynchronousServicePlanService syncPlans = Mock(MorpheusSynchronousServicePlanService)
+		MorpheusSynchronousServicePlanPriceSetService syncPlanPriceSets = Mock(MorpheusSynchronousServicePlanPriceSetService)
+		MorpheusServicePlanPriceSetService asyncPlanPriceSets = Mock(MorpheusServicePlanPriceSetService)
+		context.getServices() >> services
+		context.getAsync() >> async
+		services.getServicePlan() >> syncPlans
+		services.getServicePlanPriceSet() >> syncPlanPriceSets
+		async.getServicePlan() >> servicePlanContext
+		async.getServicePlanPriceSet() >> asyncPlanPriceSets
+		service.@morpheusContext = context
+
+		def keepA = new ServicePlanIdentityProjection(id: 10, code: 'digitalocean.size.a')
+		def dupA = new ServicePlanIdentityProjection(id: 20, code: 'digitalocean.size.a')
+		def usedA = new ServicePlanIdentityProjection(id: 30, code: 'digitalocean.size.a')
+		def keepB = new ServicePlanIdentityProjection(id: 5, code: 'digitalocean.size.b')
+		ServicePlanPriceSet link = new ServicePlanPriceSet(id: 1)
+		ServicePlan usedPlan = new ServicePlan(id: 30, code: 'digitalocean.size.a', active: true)
+
+		when:
+		def keepers = service.cleanDuplicates([usedA, keepA, keepB, dupA])
+
+		then:
+		keepers*.id.sort() == [5L, 10L]
+		1 * asyncPlanPriceSets.listByServicePlanIds({ it.sort() == [20L, 30L] }) >> Observable.just(link)
+		1 * syncPlanPriceSets.bulkRemove([link])
+		1 * syncPlans.bulkRemove({ it*.id.sort() == [20L, 30L] }) >> new BulkRemoveResult<ServicePlanIdentityProjection>(null, null, [usedA])
+		1 * servicePlanContext.listById([30L]) >> Observable.just(usedPlan)
+		1 * syncPlans.bulkSave({ it == [usedPlan] && it.first().active == false })
+	}
+
+	void "cleanDuplicates does nothing when there are no duplicates"() {
+		given:
+		MorpheusContext context = Mock(MorpheusContext)
+		service.@morpheusContext = context
+		def a = new ServicePlanIdentityProjection(id: 1, code: 'digitalocean.size.a')
+		def b = new ServicePlanIdentityProjection(id: 2, code: 'digitalocean.size.b')
+
+		when:
+		def keepers = service.cleanDuplicates([a, b])
+
+		then:
+		keepers == [a, b]
+		0 * context._
+	}
+
+	void "cleanDuplicates keeps a live copy over an older soft-deleted copy"() {
+		given:
+		MorpheusContext context = Mock(MorpheusContext)
+		MorpheusServices services = Mock(MorpheusServices)
+		MorpheusAsyncServices async = Mock(MorpheusAsyncServices)
+		MorpheusSynchronousServicePlanService syncPlans = Mock(MorpheusSynchronousServicePlanService)
+		MorpheusServicePlanPriceSetService asyncPlanPriceSets = Mock(MorpheusServicePlanPriceSetService)
+		context.getServices() >> services
+		context.getAsync() >> async
+		services.getServicePlan() >> syncPlans
+		async.getServicePlanPriceSet() >> asyncPlanPriceSets
+		service.@morpheusContext = context
+		def deletedOld = new ServicePlanIdentityProjection(id: 43023, code: 'digitalocean.size.s-2vcpu-8gb-amd', deleted: true)
+		def live = new ServicePlanIdentityProjection(id: 43026, code: 'digitalocean.size.s-2vcpu-8gb-amd', deleted: false)
+
+		when:
+		def keepers = service.cleanDuplicates([deletedOld, live])
+
+		then:
+		keepers*.id == [43026L]
+		1 * asyncPlanPriceSets.listByServicePlanIds([43023L]) >> Observable.empty()
+		1 * syncPlans.bulkRemove({ it*.id == [43023L] }) >> new BulkRemoveResult<ServicePlanIdentityProjection>(null, null, [])
+	}
+
+	void "filterServicePlans only keeps DigitalOcean plans offered in the cloud datacenter"() {
+		given:
+		DigitalOceanCloudProvider provider = new DigitalOceanCloudProvider(null, null)
+		Cloud cloud = new Cloud(configMap: [datacenter: 'nyc1'])
+		ServicePlan inRegion = new ServicePlan(code: 'digitalocean.size.amd', subRegionCodes: ['nyc1', 'sfo3'] as Set)
+		ServicePlan outOfRegion = new ServicePlan(code: 'digitalocean.size.basic', subRegionCodes: ['sfo3'] as Set)
+		ServicePlan unavailable = new ServicePlan(code: 'digitalocean.size.gone', subRegionCodes: [] as Set)
+		ServicePlan notSynced = new ServicePlan(code: 'digitalocean.size.new', subRegionCodes: null)
+		ServicePlan custom = new ServicePlan(code: 'custom.plan', subRegionCodes: ['ams3'] as Set)
+
+		expect:
+		provider.filterServicePlans(cloud, [inRegion, outOfRegion, unavailable, notSynced, custom], null) == [inRegion, notSynced, custom]
+		provider.filterServicePlans(new Cloud(configMap: [:]), [outOfRegion], null) == [outOfRegion]
 	}
 
 	void "getNameForSize"() {
