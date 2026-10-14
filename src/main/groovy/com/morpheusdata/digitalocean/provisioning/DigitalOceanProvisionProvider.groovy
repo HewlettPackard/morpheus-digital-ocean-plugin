@@ -460,8 +460,8 @@ class DigitalOceanProvisionProvider extends AbstractProvisionProvider implements
 	}
 
 	@Override
-	ServiceResponse<ProvisionResponse> runWorkload(Workload workload, WorkloadRequest workloadRequest, Map opts) {
-		DigitalOceanApiService apiService = new DigitalOceanApiService()
+	ServiceResponse<ProvisionResponse> runWorkload(Workload workload, WorkloadRequest workloadRequest, Map opts, DigitalOceanApiService apiService=null) {
+		apiService = apiService ?: new DigitalOceanApiService()
 		log.debug("runWorkload: ${workload.configs} ${opts}")
 		def containerConfig = new groovy.json.JsonSlurper().parseText(workload.configs ?: '{}')
 		ComputeServer server = workload.server
@@ -780,8 +780,8 @@ class DigitalOceanProvisionProvider extends AbstractProvisionProvider implements
 	}
 
 	@Override
-	ServiceResponse resizeWorkload(Instance instance, Workload workload, ResizeRequest resizeRequest, Map opts) {
-		DigitalOceanApiService apiService = new DigitalOceanApiService()
+	ServiceResponse resizeWorkload(Instance instance, Workload workload, ResizeRequest resizeRequest, Map opts, DigitalOceanApiService apiService=null) {
+		apiService = apiService ?: new DigitalOceanApiService()
 		log.debug("resizeWorkload: ${instance} ${workload} ${resizeRequest} ${opts}")
 		internalResizeServer(workload.server, resizeRequest, apiService)
 	}
@@ -974,7 +974,7 @@ class DigitalOceanProvisionProvider extends AbstractProvisionProvider implements
 		return rtn
 	}
 
-	private Map<String, ComputeServerType> getAllComputeServerTypes() {
-		def computeServerTypes = morpheusContext.async.cloud.getComputeServerTypes(cloud.id).blockingGet().collectEntries { [it.code, it] }
+	private Map<String, ComputeServerType> getAllComputeServerTypes(Long cloudId) {
+		def computeServerTypes = morpheusContext.async.cloud.getComputeServerTypes(cloudId).blockingGet().collectEntries { [it.code, it] }
 	}
 }

@@ -312,8 +312,8 @@ class DigitalOceanCloudProvider implements CloudProvider {
 	}
 
 	@Override
-	ServiceResponse validate(Cloud cloud, ValidateCloudRequest validateCloudRequest) {
-		DigitalOceanApiService apiService = new DigitalOceanApiService()
+	ServiceResponse validate(Cloud cloud, ValidateCloudRequest validateCloudRequest, DigitalOceanApiService apiService=null) {
+		apiService = apiService ?: new DigitalOceanApiService()
 		log.debug("validating Cloud: ${cloud.code}, ${validateCloudRequest.credentialType} ${validateCloudRequest.credentialUsername} ${validateCloudRequest.credentialPassword}")
 		if (!cloud.configMap.datacenter) {
 			return new ServiceResponse(success: false, msg: 'Choose a datacenter')
@@ -350,8 +350,8 @@ class DigitalOceanCloudProvider implements CloudProvider {
 	}
 
 	@Override
-	ServiceResponse initializeCloud(Cloud cloud) {
-		DigitalOceanApiService apiService = new DigitalOceanApiService()
+	ServiceResponse initializeCloud(Cloud cloud, DigitalOceanApiService apiService=null) {
+		apiService = apiService ?: new DigitalOceanApiService()
 		ServiceResponse serviceResponse
 		log.debug("Initializing Cloud: ${cloud.code}")
 		log.debug("config: ${cloud.configMap}")
