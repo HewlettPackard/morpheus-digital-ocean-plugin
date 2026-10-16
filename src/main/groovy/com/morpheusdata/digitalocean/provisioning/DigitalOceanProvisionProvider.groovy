@@ -868,8 +868,9 @@ class DigitalOceanProvisionProvider extends AbstractProvisionProvider implements
 		String dropletId = workload.server.externalId
 		log.debug("removeWorkload: ${dropletId}")
 		if (!dropletId) {
-			log.debug("no Droplet ID provided")
-			return new ServiceResponse(success: false, msg: 'No Droplet ID provided')
+			// no droplet was ever created so there is nothing to delete in DigitalOcean
+			log.debug("no Droplet ID provided, skipping droplet delete")
+			return ServiceResponse.success()
 		}
 
 		String apiKey = plugin.getAuthConfig(workload.server.cloud).doApiKey
