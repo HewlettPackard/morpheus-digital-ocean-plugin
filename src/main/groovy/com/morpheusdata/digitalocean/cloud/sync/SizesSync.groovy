@@ -175,8 +175,11 @@ class SizesSync {
 				save = true
 			}
 
-			if((localItem.subRegionCodes ?: [] as Set) != (remoteItem.subRegionCodes ?: [] as Set)) {
-				localItem.subRegionCodes = remoteItem.subRegionCodes
+			// plans are shared by every DigitalOcean cloud, so merge in this cloud's regions rather than
+			// overwriting, or one cloud's sync would erase region availability seen by another cloud's account
+			Set<String> mergedRegions = ((localItem.subRegionCodes ?: [] as Set) + (remoteItem.subRegionCodes ?: [] as Set)) as Set<String>
+			if(mergedRegions != (localItem.subRegionCodes ?: [] as Set)) {
+				localItem.subRegionCodes = mergedRegions
 				save = true
 			}
 
