@@ -11,6 +11,8 @@ import com.morpheusdata.core.MorpheusServicePlanService
 import com.morpheusdata.core.MorpheusServices
 import com.morpheusdata.core.synchronous.MorpheusSynchronousServicePlanPriceSetService
 import com.morpheusdata.core.synchronous.MorpheusSynchronousServicePlanService
+import com.morpheusdata.core.synchronous.cloud.MorpheusSynchronousCloudService
+import com.morpheusdata.response.ServiceResponse
 import com.morpheusdata.core.util.SyncTask
 import com.morpheusdata.model.ServicePlanPriceSet
 import com.morpheusdata.core.MorpheusVirtualImageService
@@ -138,7 +140,51 @@ class SizesSyncSpec extends Specification {
 		1 * syncPlans.bulkSave({ it == [usedPlan] && it.first().active == false })
 	}
 
-	void "updateMatchedPlans merges subRegionCodes instead of overwriting so one cloud's sync can't erase another's regions"() {
+	void "saveCloudSizeRegions persists only this cloud's own fetched region data onto its own configMap"() {
+		given:
+		MorpheusContext context = Mock(MorpheusContext)
+		MorpheusServices services = Mock(MorpheusServices)
+		MorpheusSynchronousCloudService syncCloud = Mock(MorpheusSynchronousCloudService)
+		context.getServices() >> services
+		services.getCloud() >> syncCloud
+		service.@morpheusContext = context
+
+		ServiceResponse response = new ServiceResponse(success: true, data: [
+			[slug: 'c-4', regions: ['nyc1', 'blr1'], available: true],
+			[slug: 'gone', regions: ['sfo2'], available: false]
+		])
+
+		when:
+		service.saveCloudSizeRegions(response)
+
+		then:
+		service.@cloud.getConfigProperty('doSizeRegions') == ['c-4': ['nyc1', 'blr1'], gone: []]
+		1 * syncCloud.save(service.@cloud)
+	}
+
+	void "aggregateSubRegionCodesBySlug unions every enabled DigitalOcean cloud's already-saved region data without calling any cloud's API"() {
+		given:
+		MorpheusContext context = Mock(MorpheusContext)
+		MorpheusServices services = Mock(MorpheusServices)
+		MorpheusSynchronousCloudService syncCloud = Mock(MorpheusSynchronousCloudService)
+		context.getServices() >> services
+		services.getCloud() >> syncCloud
+		service.@morpheusContext = context
+
+		Cloud thisCloud = service.@cloud
+		thisCloud.configMap = [doSizeRegions: ['c-4': ['nyc1', 'blr1']]]
+		Cloud otherCloud = new Cloud(id: 2, code: 'other-do-cloud', configMap: [doSizeRegions: ['c-4': ['lon1']]])
+
+		when:
+		def result = service.aggregateSubRegionCodesBySlug()
+
+		then:
+		1 * syncCloud.list(_) >> [thisCloud, otherCloud]
+		0 * apiService.listDropletSizes(_)
+		result == ['c-4': ['nyc1', 'blr1', 'lon1'] as Set]
+	}
+
+	void "updateMatchedPlans overwrites subRegionCodes so a region dropped by every account stops lingering"() {
 		given:
 		MorpheusContext context = Mock(MorpheusContext)
 		MorpheusServices services = Mock(MorpheusServices)
@@ -148,9 +194,9 @@ class SizesSyncSpec extends Specification {
 		service.@morpheusContext = context
 		service.metaClass.syncPlanPrices = { List<ServicePlan> plans -> null }
 
-		// localItem was previously synced by a cloud whose account sees nyc1; remoteItem is this sync's
-		// data from a different cloud/account that only sees blr1/lon1/sfo2 for the same shared plan
-		ServicePlan localItem = new ServicePlan(code: 'digitalocean.size.c-4', name: 'CPU-Optimized', subRegionCodes: ['nyc1'] as Set)
+		// localItem retains nyc1 from a stale sync; remoteItem is this sync's freshly recomputed
+		// cross-account truth, which no longer includes nyc1 for this shared plan
+		ServicePlan localItem = new ServicePlan(code: 'digitalocean.size.c-4', name: 'CPU-Optimized', subRegionCodes: ['nyc1', 'blr1'] as Set)
 		ServicePlan remoteItem = new ServicePlan(code: 'digitalocean.size.c-4', name: 'CPU-Optimized', subRegionCodes: ['blr1', 'lon1', 'sfo2'] as Set)
 		def updateItem = new SyncTask.UpdateItem<ServicePlan, ServicePlan>(existingItem: localItem, masterItem: remoteItem)
 
@@ -158,18 +204,18 @@ class SizesSyncSpec extends Specification {
 		service.updateMatchedPlans([updateItem])
 
 		then:
-		localItem.subRegionCodes == ['nyc1', 'blr1', 'lon1', 'sfo2'] as Set
+		localItem.subRegionCodes == ['blr1', 'lon1', 'sfo2'] as Set
 		1 * syncPlans.bulkSave({ it == [localItem] })
 	}
 
-	void "updateMatchedPlans does not resave a plan whose regions are already a subset of what's recorded"() {
+	void "updateMatchedPlans does not resave a plan whose regions are unchanged"() {
 		given:
 		MorpheusContext context = Mock(MorpheusContext)
 		service.@morpheusContext = context
 		service.metaClass.syncPlanPrices = { List<ServicePlan> plans -> null }
 
 		ServicePlan localItem = new ServicePlan(code: 'digitalocean.size.c-4', name: 'CPU-Optimized', subRegionCodes: ['blr1', 'lon1', 'sfo2'] as Set)
-		ServicePlan remoteItem = new ServicePlan(code: 'digitalocean.size.c-4', name: 'CPU-Optimized', subRegionCodes: ['blr1'] as Set)
+		ServicePlan remoteItem = new ServicePlan(code: 'digitalocean.size.c-4', name: 'CPU-Optimized', subRegionCodes: ['blr1', 'lon1', 'sfo2'] as Set)
 		def updateItem = new SyncTask.UpdateItem<ServicePlan, ServicePlan>(existingItem: localItem, masterItem: remoteItem)
 
 		when:

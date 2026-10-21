@@ -69,6 +69,14 @@ class SizesSync {
 			ProvisionType provisionType = new ProvisionType(code: provisionProvider.provisionTypeCode)
 			String apiKey = plugin.getAuthConfig(cloud).doApiKey
 			ServiceResponse response = apiService.listDropletSizes(apiKey)
+
+			// ServicePlan.subRegionCodes is shared across every DigitalOcean cloud, and different accounts can
+			// see different region availability for the same size, so each cloud's own current region data is
+			// saved onto that cloud (not the shared plan), and the shared value is recomputed as the union of
+			// what every enabled cloud has recorded about itself.
+			saveCloudSizeRegions(response)
+			Map<String, Set<String>> subRegionCodesBySlug = aggregateSubRegionCodesBySlug()
+
 			List<ServicePlan> servicePlans = []
 			response.data?.each {
 				def name = getNameForSize(it)
@@ -87,7 +95,7 @@ class SizesSync {
 						price_monthly: new BigDecimal((it.price_monthly ?: '0.0').toString()),
 						price_hourly: new BigDecimal((it.price_hourly ?: '0.0').toString()),
 						provisionType: provisionType,
-						subRegionCodes: (it.available == false ? [] : (it.regions ?: [])) as Set<String>
+						subRegionCodes: subRegionCodesBySlug[it.slug.toString()] ?: ([] as Set<String>)
 				)
 				servicePlans << servicePlan
 			}
@@ -147,6 +155,37 @@ class SizesSync {
 		}
 	}
 
+	/**
+	 * Saves this cloud's own current slug -> region list onto its own configMap.
+	 */
+	private void saveCloudSizeRegions(ServiceResponse response) {
+		Map<String, List<String>> sizeRegions = [:]
+		response.data?.each {
+			sizeRegions[it.slug.toString()] = (it.available == false ? [] : (it.regions ?: [])) as List<String>
+		}
+		cloud.setConfigProperty('doSizeRegions', sizeRegions)
+		morpheusContext.services.cloud.save(cloud)
+	}
+
+	/**
+	 * Builds the slug -> region codes map used to overwrite ServicePlan.subRegionCodes, by unioning the
+	 * configMap.doSizeRegions already saved by every enabled DigitalOcean cloud.
+	 */
+	private Map<String, Set<String>> aggregateSubRegionCodesBySlug() {
+		Map<String, Set<String>> subRegionCodesBySlug = [:].withDefault { [] as Set<String> }
+		List<Cloud> doClouds = morpheusContext.services.cloud.list(
+			new DataQuery().withFilter(new DataFilter<String>('cloudType.code', 'digitalocean'))
+				.withFilter(new DataFilter<Boolean>('enabled', true))
+		)
+		doClouds.each { doCloud ->
+			Map<String, List<String>> sizeRegions = doCloud.getConfigProperty('doSizeRegions') as Map ?: [:]
+			sizeRegions.each { slug, regions ->
+				subRegionCodesBySlug[slug.toString()].addAll((regions ?: []) as List<String>)
+			}
+		}
+		return subRegionCodesBySlug
+	}
+
 	def updateMatchedPlans(List<SyncTask.UpdateItem<ServicePlan,ServicePlan>> updateItems) {
 		log.debug("updateMatchedPlans: updating ${updateItems.size()} plans")
 		List<ServicePlan> itemsToUpdate = []
@@ -175,11 +214,10 @@ class SizesSync {
 				save = true
 			}
 
-			// plans are shared by every DigitalOcean cloud, so merge in this cloud's regions rather than
-			// overwriting, or one cloud's sync would erase region availability seen by another cloud's account
-			Set<String> mergedRegions = ((localItem.subRegionCodes ?: [] as Set) + (remoteItem.subRegionCodes ?: [] as Set)) as Set<String>
-			if(mergedRegions != (localItem.subRegionCodes ?: [] as Set)) {
-				localItem.subRegionCodes = mergedRegions
+			// remoteItem.subRegionCodes is the union across every enabled DigitalOcean cloud (see
+			// aggregateSubRegionCodesBySlug), so it's the shared source of truth and can be safely overwritten.
+			if((localItem.subRegionCodes ?: [] as Set) != (remoteItem.subRegionCodes ?: [] as Set)) {
+				localItem.subRegionCodes = remoteItem.subRegionCodes
 				save = true
 			}
 
