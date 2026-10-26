@@ -16,6 +16,9 @@
 
 package com.morpheusdata.digitalocean.cloud.sync
 
+import com.morpheusdata.core.BulkRemoveResult
+import com.morpheusdata.core.data.DataFilter
+import com.morpheusdata.core.data.DataQuery
 import com.morpheusdata.core.providers.ProvisionProvider
 import com.morpheusdata.core.util.SyncList
 import com.morpheusdata.model.Account
@@ -47,6 +50,7 @@ class SizesSync {
 	DigitalOceanPlugin plugin
 
 	static final SIZE_PREFIX = "digitalocean.size."
+	static final SYNC_LOCK_NAME = "digitalocean.sizes.sync"
 
 	SizesSync(DigitalOceanPlugin plugin, Cloud cloud, DigitalOceanApiService apiService) {
 		this.plugin = plugin
@@ -57,11 +61,22 @@ class SizesSync {
 
 	def execute() {
 		log.debug("SizesSync execute: ${cloud}")
+		String lockId
 		try {
+			// plans are shared by every DigitalOcean cloud so serialize sync appliance-wide
+			lockId = morpheusContext.acquireLock(SYNC_LOCK_NAME, [timeout: 10l * 60l * 1000l, ttl: 10l * 60l * 1000l]).blockingGet()
 			ProvisionProvider provisionProvider = (ProvisionProvider)this.plugin.getProviderByCode('digitalocean-provision-provider')
 			ProvisionType provisionType = new ProvisionType(code: provisionProvider.provisionTypeCode)
 			String apiKey = plugin.getAuthConfig(cloud).doApiKey
 			ServiceResponse response = apiService.listDropletSizes(apiKey)
+
+			// ServicePlan.subRegionCodes is shared across every DigitalOcean cloud, and different accounts can
+			// see different region availability for the same size, so each cloud's own current region data is
+			// saved onto that cloud (not the shared plan), and the shared value is recomputed as the union of
+			// what every enabled cloud has recorded about itself.
+			saveCloudSizeRegions(response)
+			Map<String, Set<String>> subRegionCodesBySlug = aggregateSubRegionCodesBySlug()
+
 			List<ServicePlan> servicePlans = []
 			response.data?.each {
 				def name = getNameForSize(it)
@@ -79,9 +94,8 @@ class SizesSync {
 						sortOrder: it.disk.toLong(),
 						price_monthly: new BigDecimal((it.price_monthly ?: '0.0').toString()),
 						price_hourly: new BigDecimal((it.price_hourly ?: '0.0').toString()),
-						refType: 'ComputeZone',
-						refId: cloud.id,
-						provisionType: provisionType
+						provisionType: provisionType,
+						subRegionCodes: subRegionCodesBySlug[it.slug.toString()] ?: ([] as Set<String>)
 				)
 				servicePlans << servicePlan
 			}
@@ -89,7 +103,11 @@ class SizesSync {
 			log.debug("Service Plans to sync, total: ${servicePlans.size()}, codes: ${servicePlans.collect { it.code}}")
 
 			if (servicePlans) {
-				Observable<ServicePlanIdentityProjection> domainPlans = morpheusContext.async.servicePlan.listSyncProjections(provisionType)
+				// list by code prefix so copies with a missing provision type are still matched
+				List<ServicePlanIdentityProjection> existingPlans = morpheusContext.async.servicePlan.listIdentityProjections(
+					new DataQuery().withFilter(new DataFilter<String>('code', '=~', "${SIZE_PREFIX}%".toString()))
+				).toList().blockingGet()
+				Observable<ServicePlanIdentityProjection> domainPlans = Observable.fromIterable(cleanDuplicates(existingPlans))
 				SyncTask<ServicePlanIdentityProjection, ServicePlan, ServicePlan> syncTask = new SyncTask(domainPlans, servicePlans)
 				syncTask.addMatchFunction { ServicePlanIdentityProjection projection, ServicePlan apiPlan ->
 					return projection.code == apiPlan.code
@@ -128,12 +146,44 @@ class SizesSync {
 				}.start()
 
 			}
-
-			// clean up old duplicate data caused by a bug in v1.0.0 of this plugin sync
-			cleanDuplicates()
 		} catch(e) {
 			log.error("Error in execute : ${e}", e)
+		} finally {
+			if(lockId) {
+				morpheusContext.releaseLock(SYNC_LOCK_NAME, [lock: lockId]).blockingGet()
+			}
 		}
+	}
+
+	/**
+	 * Saves this cloud's own current slug -> region list onto its own configMap.
+	 */
+	private void saveCloudSizeRegions(ServiceResponse response) {
+		Map<String, List<String>> sizeRegions = [:]
+		response.data?.each {
+			sizeRegions[it.slug.toString()] = (it.available == false ? [] : (it.regions ?: [])) as List<String>
+		}
+		cloud.setConfigProperty('doSizeRegions', sizeRegions)
+		morpheusContext.services.cloud.save(cloud)
+	}
+
+	/**
+	 * Builds the slug -> region codes map used to overwrite ServicePlan.subRegionCodes, by unioning the
+	 * configMap.doSizeRegions already saved by every enabled DigitalOcean cloud.
+	 */
+	private Map<String, Set<String>> aggregateSubRegionCodesBySlug() {
+		Map<String, Set<String>> subRegionCodesBySlug = [:].withDefault { [] as Set<String> }
+		List<Cloud> doClouds = morpheusContext.services.cloud.list(
+			new DataQuery().withFilter(new DataFilter<String>('cloudType.code', 'digitalocean'))
+				.withFilter(new DataFilter<Boolean>('enabled', true))
+		)
+		doClouds.each { doCloud ->
+			Map<String, List<String>> sizeRegions = doCloud.getConfigProperty('doSizeRegions') as Map ?: [:]
+			sizeRegions.each { slug, regions ->
+				subRegionCodesBySlug[slug.toString()].addAll((regions ?: []) as List<String>)
+			}
+		}
+		return subRegionCodesBySlug
 	}
 
 	def updateMatchedPlans(List<SyncTask.UpdateItem<ServicePlan,ServicePlan>> updateItems) {
@@ -164,13 +214,32 @@ class SizesSync {
 				save = true
 			}
 
+			// remoteItem.subRegionCodes is the union across every enabled DigitalOcean cloud (see
+			// aggregateSubRegionCodesBySlug), so it's the shared source of truth and can be safely overwritten.
+			if((localItem.subRegionCodes ?: [] as Set) != (remoteItem.subRegionCodes ?: [] as Set)) {
+				localItem.subRegionCodes = remoteItem.subRegionCodes
+				save = true
+			}
+
+			if(localItem.provisionType?.code != remoteItem.provisionType?.code) {
+				localItem.provisionType = remoteItem.provisionType
+				save = true
+			}
+
+			// shared plans must not be owned by one cloud or deleting that cloud removes them
+			if(localItem.refType != null || localItem.refId != null) {
+				localItem.refType = null
+				localItem.refId = null
+				save = true
+			}
+
 			if(save) {
 				itemsToUpdate << localItem
 			}
 		}
 
 		if(itemsToUpdate.size() > 0) {
-			morpheusContext.async.servicePlan.save(itemsToUpdate).blockingGet()
+			morpheusContext.services.servicePlan.bulkSave(itemsToUpdate)
 		}
 
 		syncPlanPrices(updateItems.collect { it.existingItem })
@@ -182,12 +251,13 @@ class SizesSync {
 		List<String> priceSetCodes = []
 		List<AccountPriceSet> apiPriceSets = []
 		List<AccountPrice> apiPrices = []
-		Map<String, ServicePlan> priceSetPlans = [:]
+		Map<String, List<ServicePlan>> priceSetPlans = [:]
 		Map<String, ServicePlan> priceSetPrices = [:]
 
 		// fetch service plans with their updated IDs
 		List<String> servicePlanCodes = servicePlans.collect { it.code }
-		Map<String, ServicePlan> tmpServicePlanMap = morpheusContext.async.servicePlan.listByCode(servicePlanCodes).distinct { it.code }.toList().blockingGet().collectEntries { [(it.code):it]}
+		// every remaining copy of a size is priced, including retained copies still used by instances
+		Map<String, List<ServicePlan>> tmpServicePlanMap = morpheusContext.async.servicePlan.listByCode(servicePlanCodes).toList().blockingGet().groupBy { it.code }
 
 		priceUnits.each { String priceUnit ->
 			// each new or existing service plan
@@ -197,10 +267,7 @@ class SizesSync {
 				if(!priceSetCodes.contains(priceSetCode)) { // prevent duplicate codes
 					priceSetCodes << priceSetCode
 
-					def tmpServicePlan = tmpServicePlanMap[servicePlan.code]
-					// need the id from the local plan and the price from the temp api plan
-					servicePlan.id = tmpServicePlan.id
-					priceSetPlans[priceSetCode] = servicePlan
+					priceSetPlans[priceSetCode] = tmpServicePlanMap[servicePlan.code] ?: []
 
 					AccountPriceSet priceSet = new AccountPriceSet(
 						name: priceSetName,
@@ -294,7 +361,7 @@ class SizesSync {
 
 	}
 
-	def createPriceSets(List<AccountPriceSet> createList, Map<String, ServicePlan> priceSetPlans) {
+	def createPriceSets(List<AccountPriceSet> createList, Map<String, List<ServicePlan>> priceSetPlans) {
 		Boolean priceSetsCreated = morpheusContext.async.accountPriceSet.create(createList).blockingGet()
 		if(priceSetsCreated) {
 			List<AccountPriceSet> tmpPriceSets = morpheusContext.async.accountPriceSet.listByCode(createList.collect { it.code }).distinct{it.code }.toList().blockingGet()
@@ -302,7 +369,7 @@ class SizesSync {
 		}
 	}
 
-	def updateMatchedPriceSet(List<SyncTask.UpdateItem<AccountPriceSet,AccountPriceSet>> updateItems, Map<String, ServicePlan> priceSetPlans) {
+	def updateMatchedPriceSet(List<SyncTask.UpdateItem<AccountPriceSet,AccountPriceSet>> updateItems, Map<String, List<ServicePlan>> priceSetPlans) {
 		List<AccountPriceSet> itemsToUpdate = []
 		updateItems.each {it ->
 			AccountPriceSet remoteItem = it.masterItem
@@ -326,22 +393,25 @@ class SizesSync {
 		syncServicePlanPriceSets(updateItems.collect { it.existingItem }, priceSetPlans)
 	}
 
-	def syncServicePlanPriceSets(List<AccountPriceSet> priceSets, Map<String, ServicePlan> priceSetPlans) {
+	def syncServicePlanPriceSets(List<AccountPriceSet> priceSets, Map<String, List<ServicePlan>> priceSetPlans) {
 		Map<String, ServicePlanPriceSet> apiItems = [:]
 
 		// make sure we have a distinct list of price sets to prevent duplicate service plan price sets.
 		// this is primarily an issue when the data already had duplicates, we will continue to create duplicates
 		// and compound the problem.
-		priceSets?.collect { AccountPriceSet priceSet ->
-			if(apiItems[priceSet.code] == null) {
-				apiItems[priceSet.code] = new ServicePlanPriceSet(priceSet: priceSet, servicePlan: priceSetPlans[priceSet.code])
+		priceSets?.each { AccountPriceSet priceSet ->
+			priceSetPlans[priceSet.code]?.each { ServicePlan plan ->
+				String itemKey = "${priceSet.code}:${plan.id}".toString()
+				if(apiItems[itemKey] == null) {
+					apiItems[itemKey] = new ServicePlanPriceSet(priceSet: priceSet, servicePlan: plan)
+				}
 			}
 		}
 
 		Observable<ServicePlanPriceSetIdentityProjection> existingItems = morpheusContext.servicePlanPriceSet.listSyncProjections(priceSets)
 		SyncTask<ServicePlanPriceSetIdentityProjection, ServicePlanPriceSet, ServicePlanPriceSet> syncTask = new SyncTask(existingItems, apiItems.values())
 		syncTask.addMatchFunction { ServicePlanPriceSetIdentityProjection projection, ServicePlanPriceSet apiItem ->
-			return (projection.priceSet.code == apiItem.priceSet.code && projection.servicePlan.code == apiItem.servicePlan.code)
+			return (projection.priceSet.code == apiItem.priceSet.code && projection.servicePlan.id == apiItem.servicePlan.id)
 		}.onDelete { List<ServicePlanPriceSetIdentityProjection> deleteList ->
 			morpheusContext.async.servicePlanPriceSet.remove(deleteList).blockingGet()
 		}.onAdd { createList ->
@@ -454,11 +524,31 @@ class SizesSync {
 		}
 	}
 
-	def cleanDuplicates() {
-		// service plan price sets
-		// account price
-		// account price set
-		// service plan
+	List<ServicePlanIdentityProjection> cleanDuplicates(List<ServicePlanIdentityProjection> existingPlans) {
+		List<ServicePlanIdentityProjection> keepers = []
+		List<ServicePlanIdentityProjection> duplicates = []
+		existingPlans.groupBy { it.code }.each { String code, List<ServicePlanIdentityProjection> copies ->
+			// prefer a live copy over a soft-deleted one, then the oldest
+			List<ServicePlanIdentityProjection> sorted = copies.sort { a, b -> ((a.deleted ? 1 : 0) <=> (b.deleted ? 1 : 0)) ?: (a.id <=> b.id) }
+			keepers << sorted.first()
+			duplicates.addAll(sorted.drop(1))
+		}
+		duplicates.collate(50).each { List<ServicePlanIdentityProjection> chunk ->
+			log.info("Removing ${chunk.size()} duplicate DigitalOcean service plans")
+			List<ServicePlanPriceSet> planPriceSets = morpheusContext.async.servicePlanPriceSet.listByServicePlanIds(chunk.collect { it.id }).toList().blockingGet()
+			if(planPriceSets) {
+				morpheusContext.services.servicePlanPriceSet.bulkRemove(planPriceSets)
+			}
+			BulkRemoveResult<ServicePlanIdentityProjection> removeResult = morpheusContext.services.servicePlan.bulkRemove(chunk)
+			List<Long> retainedIds = removeResult?.failedItems?.collect { it.id } ?: []
+			if(retainedIds) {
+				// copies still referenced by instances or usage cannot be removed so hide them from selection
+				List<ServicePlan> retainedPlans = morpheusContext.async.servicePlan.listById(retainedIds).toList().blockingGet()
+				retainedPlans.each { it.active = false }
+				morpheusContext.services.servicePlan.bulkSave(retainedPlans)
+			}
+		}
+		return keepers
 	}
 
 

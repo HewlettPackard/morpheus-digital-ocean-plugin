@@ -4,7 +4,17 @@ import com.morpheusdata.digitalocean.DigitalOceanApiService
 import com.morpheusdata.digitalocean.DigitalOceanPlugin
 import com.morpheusdata.digitalocean.cloud.DigitalOceanCloudProvider
 import com.morpheusdata.core.MorpheusContext
+import com.morpheusdata.core.BulkRemoveResult
+import com.morpheusdata.core.MorpheusAsyncServices
+import com.morpheusdata.core.MorpheusServicePlanPriceSetService
 import com.morpheusdata.core.MorpheusServicePlanService
+import com.morpheusdata.core.MorpheusServices
+import com.morpheusdata.core.synchronous.MorpheusSynchronousServicePlanPriceSetService
+import com.morpheusdata.core.synchronous.MorpheusSynchronousServicePlanService
+import com.morpheusdata.core.synchronous.cloud.MorpheusSynchronousCloudService
+import com.morpheusdata.response.ServiceResponse
+import com.morpheusdata.core.util.SyncTask
+import com.morpheusdata.model.ServicePlanPriceSet
 import com.morpheusdata.core.MorpheusVirtualImageService
 import com.morpheusdata.core.Plugin
 import com.morpheusdata.model.Cloud
@@ -95,13 +105,188 @@ class SizesSyncSpec extends Specification {
 		1 * servicePlanContext.remove({ list -> list.size() == 1 && list.first().externalId == removePlan.externalId })
 	}
 
+	void "cleanDuplicates keeps the lowest id per code and deactivates copies that cannot be removed"() {
+		given:
+		MorpheusContext context = Mock(MorpheusContext)
+		MorpheusServices services = Mock(MorpheusServices)
+		MorpheusAsyncServices async = Mock(MorpheusAsyncServices)
+		MorpheusSynchronousServicePlanService syncPlans = Mock(MorpheusSynchronousServicePlanService)
+		MorpheusSynchronousServicePlanPriceSetService syncPlanPriceSets = Mock(MorpheusSynchronousServicePlanPriceSetService)
+		MorpheusServicePlanPriceSetService asyncPlanPriceSets = Mock(MorpheusServicePlanPriceSetService)
+		context.getServices() >> services
+		context.getAsync() >> async
+		services.getServicePlan() >> syncPlans
+		services.getServicePlanPriceSet() >> syncPlanPriceSets
+		async.getServicePlan() >> servicePlanContext
+		async.getServicePlanPriceSet() >> asyncPlanPriceSets
+		service.@morpheusContext = context
+
+		def keepA = new ServicePlanIdentityProjection(id: 10, code: 'digitalocean.size.a')
+		def dupA = new ServicePlanIdentityProjection(id: 20, code: 'digitalocean.size.a')
+		def usedA = new ServicePlanIdentityProjection(id: 30, code: 'digitalocean.size.a')
+		def keepB = new ServicePlanIdentityProjection(id: 5, code: 'digitalocean.size.b')
+		ServicePlanPriceSet link = new ServicePlanPriceSet(id: 1)
+		ServicePlan usedPlan = new ServicePlan(id: 30, code: 'digitalocean.size.a', active: true)
+
+		when:
+		def keepers = service.cleanDuplicates([usedA, keepA, keepB, dupA])
+
+		then:
+		keepers*.id.sort() == [5L, 10L]
+		1 * asyncPlanPriceSets.listByServicePlanIds({ it.sort() == [20L, 30L] }) >> Observable.just(link)
+		1 * syncPlanPriceSets.bulkRemove([link])
+		1 * syncPlans.bulkRemove({ it*.id.sort() == [20L, 30L] }) >> new BulkRemoveResult<ServicePlanIdentityProjection>(null, null, [usedA])
+		1 * servicePlanContext.listById([30L]) >> Observable.just(usedPlan)
+		1 * syncPlans.bulkSave({ it == [usedPlan] && it.first().active == false })
+	}
+
+	void "saveCloudSizeRegions persists only this cloud's own fetched region data onto its own configMap"() {
+		given:
+		MorpheusContext context = Mock(MorpheusContext)
+		MorpheusServices services = Mock(MorpheusServices)
+		MorpheusSynchronousCloudService syncCloud = Mock(MorpheusSynchronousCloudService)
+		context.getServices() >> services
+		services.getCloud() >> syncCloud
+		service.@morpheusContext = context
+
+		ServiceResponse response = new ServiceResponse(success: true, data: [
+			[slug: 'c-4', regions: ['nyc1', 'blr1'], available: true],
+			[slug: 'gone', regions: ['sfo2'], available: false]
+		])
+
+		when:
+		service.saveCloudSizeRegions(response)
+
+		then:
+		service.@cloud.getConfigProperty('doSizeRegions') == ['c-4': ['nyc1', 'blr1'], gone: []]
+		1 * syncCloud.save(service.@cloud)
+	}
+
+	void "aggregateSubRegionCodesBySlug unions every enabled DigitalOcean cloud's already-saved region data without calling any cloud's API"() {
+		given:
+		MorpheusContext context = Mock(MorpheusContext)
+		MorpheusServices services = Mock(MorpheusServices)
+		MorpheusSynchronousCloudService syncCloud = Mock(MorpheusSynchronousCloudService)
+		context.getServices() >> services
+		services.getCloud() >> syncCloud
+		service.@morpheusContext = context
+
+		Cloud thisCloud = service.@cloud
+		thisCloud.configMap = [doSizeRegions: ['c-4': ['nyc1', 'blr1']]]
+		Cloud otherCloud = new Cloud(id: 2, code: 'other-do-cloud', configMap: [doSizeRegions: ['c-4': ['lon1']]])
+
+		when:
+		def result = service.aggregateSubRegionCodesBySlug()
+
+		then:
+		1 * syncCloud.list(_) >> [thisCloud, otherCloud]
+		0 * apiService.listDropletSizes(_)
+		result == ['c-4': ['nyc1', 'blr1', 'lon1'] as Set]
+	}
+
+	void "updateMatchedPlans overwrites subRegionCodes so a region dropped by every account stops lingering"() {
+		given:
+		MorpheusContext context = Mock(MorpheusContext)
+		MorpheusServices services = Mock(MorpheusServices)
+		MorpheusSynchronousServicePlanService syncPlans = Mock(MorpheusSynchronousServicePlanService)
+		context.getServices() >> services
+		services.getServicePlan() >> syncPlans
+		service.@morpheusContext = context
+		service.metaClass.syncPlanPrices = { List<ServicePlan> plans -> null }
+
+		// localItem retains nyc1 from a stale sync; remoteItem is this sync's freshly recomputed
+		// cross-account truth, which no longer includes nyc1 for this shared plan
+		ServicePlan localItem = new ServicePlan(code: 'digitalocean.size.c-4', name: 'CPU-Optimized', subRegionCodes: ['nyc1', 'blr1'] as Set)
+		ServicePlan remoteItem = new ServicePlan(code: 'digitalocean.size.c-4', name: 'CPU-Optimized', subRegionCodes: ['blr1', 'lon1', 'sfo2'] as Set)
+		def updateItem = new SyncTask.UpdateItem<ServicePlan, ServicePlan>(existingItem: localItem, masterItem: remoteItem)
+
+		when:
+		service.updateMatchedPlans([updateItem])
+
+		then:
+		localItem.subRegionCodes == ['blr1', 'lon1', 'sfo2'] as Set
+		1 * syncPlans.bulkSave({ it == [localItem] })
+	}
+
+	void "updateMatchedPlans does not resave a plan whose regions are unchanged"() {
+		given:
+		MorpheusContext context = Mock(MorpheusContext)
+		service.@morpheusContext = context
+		service.metaClass.syncPlanPrices = { List<ServicePlan> plans -> null }
+
+		ServicePlan localItem = new ServicePlan(code: 'digitalocean.size.c-4', name: 'CPU-Optimized', subRegionCodes: ['blr1', 'lon1', 'sfo2'] as Set)
+		ServicePlan remoteItem = new ServicePlan(code: 'digitalocean.size.c-4', name: 'CPU-Optimized', subRegionCodes: ['blr1', 'lon1', 'sfo2'] as Set)
+		def updateItem = new SyncTask.UpdateItem<ServicePlan, ServicePlan>(existingItem: localItem, masterItem: remoteItem)
+
+		when:
+		service.updateMatchedPlans([updateItem])
+
+		then:
+		localItem.subRegionCodes == ['blr1', 'lon1', 'sfo2'] as Set
+		0 * context._
+	}
+
+	void "cleanDuplicates does nothing when there are no duplicates"() {
+		given:
+		MorpheusContext context = Mock(MorpheusContext)
+		service.@morpheusContext = context
+		def a = new ServicePlanIdentityProjection(id: 1, code: 'digitalocean.size.a')
+		def b = new ServicePlanIdentityProjection(id: 2, code: 'digitalocean.size.b')
+
+		when:
+		def keepers = service.cleanDuplicates([a, b])
+
+		then:
+		keepers == [a, b]
+		0 * context._
+	}
+
+	void "cleanDuplicates keeps a live copy over an older soft-deleted copy"() {
+		given:
+		MorpheusContext context = Mock(MorpheusContext)
+		MorpheusServices services = Mock(MorpheusServices)
+		MorpheusAsyncServices async = Mock(MorpheusAsyncServices)
+		MorpheusSynchronousServicePlanService syncPlans = Mock(MorpheusSynchronousServicePlanService)
+		MorpheusServicePlanPriceSetService asyncPlanPriceSets = Mock(MorpheusServicePlanPriceSetService)
+		context.getServices() >> services
+		context.getAsync() >> async
+		services.getServicePlan() >> syncPlans
+		async.getServicePlanPriceSet() >> asyncPlanPriceSets
+		service.@morpheusContext = context
+		def deletedOld = new ServicePlanIdentityProjection(id: 43023, code: 'digitalocean.size.s-2vcpu-8gb-amd', deleted: true)
+		def live = new ServicePlanIdentityProjection(id: 43026, code: 'digitalocean.size.s-2vcpu-8gb-amd', deleted: false)
+
+		when:
+		def keepers = service.cleanDuplicates([deletedOld, live])
+
+		then:
+		keepers*.id == [43026L]
+		1 * asyncPlanPriceSets.listByServicePlanIds([43023L]) >> Observable.empty()
+		1 * syncPlans.bulkRemove({ it*.id == [43023L] }) >> new BulkRemoveResult<ServicePlanIdentityProjection>(null, null, [])
+	}
+
+	void "filterServicePlans only keeps DigitalOcean plans offered in the cloud datacenter"() {
+		given:
+		DigitalOceanCloudProvider provider = new DigitalOceanCloudProvider(null, null)
+		Cloud cloud = new Cloud(configMap: [datacenter: 'nyc1'])
+		ServicePlan inRegion = new ServicePlan(code: 'digitalocean.size.amd', subRegionCodes: ['nyc1', 'sfo3'] as Set)
+		ServicePlan outOfRegion = new ServicePlan(code: 'digitalocean.size.basic', subRegionCodes: ['sfo3'] as Set)
+		ServicePlan unavailable = new ServicePlan(code: 'digitalocean.size.gone', subRegionCodes: [] as Set)
+		ServicePlan notSynced = new ServicePlan(code: 'digitalocean.size.new', subRegionCodes: null)
+		ServicePlan custom = new ServicePlan(code: 'custom.plan', subRegionCodes: ['ams3'] as Set)
+
+		expect:
+		provider.filterServicePlans(cloud, [inRegion, outOfRegion, unavailable, notSynced, custom], null) == [inRegion, notSynced, custom]
+		provider.filterServicePlans(new Cloud(configMap: [:]), [outOfRegion], null) == [outOfRegion]
+	}
+
 	void "getNameForSize"() {
 		expect:
 		expected == service.getNameForSize(sizeData)
 
 		where:
-		sizeData                                 | expected
-		[vcpus: 1, memory: 25, disk: 25]         | 'Plugin Droplet 1 CPU, 25 MB Memory, 25 GB Storage'
-		[vcpus: 3, memory: 25 * 1024, disk: 500] | 'Plugin Droplet 3 CPU, 25 GB Memory, 500 GB Storage'
+		sizeData                                                              | expected
+		[description: 'Plugin Droplet', vcpus: 1, memory: 25, disk: 25]      | 'Plugin Droplet 1 CPU, 25 MB Memory, 25 GB Storage'
+		[description: 'Plugin Droplet', vcpus: 3, memory: 25 * 1024, disk: 500] | 'Plugin Droplet 3 CPU, 25 GB Memory, 500 GB Storage'
 	}
 }
