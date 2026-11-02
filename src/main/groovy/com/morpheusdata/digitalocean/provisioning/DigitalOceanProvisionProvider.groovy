@@ -597,7 +597,7 @@ class DigitalOceanProvisionProvider extends AbstractProvisionProvider implements
 					server.internalIp = privateIp
 					doSave = true
 				}
-				if(serverDetails.data.publicIp != publicIp) {
+				if(server.externalIp != publicIp) {
 					server.externalIp = publicIp
 					doSave = true
 				}
@@ -753,7 +753,7 @@ class DigitalOceanProvisionProvider extends AbstractProvisionProvider implements
 					server.internalIp = privateIp
 					doSave = true
 				}
-				if(serverDetails.externalIp != publicIp) {
+				if(server.externalIp != publicIp) {
 					server.externalIp = publicIp
 					doSave = true
 				}
@@ -898,13 +898,19 @@ class DigitalOceanProvisionProvider extends AbstractProvisionProvider implements
 		Integer attempts = 0
 		while (pending) {
 			log.debug("getServerDetails attempt $attempts")
-			sleep(1000l * 20l)
+			sleep(getPollIntervalMs())
 			def resp = apiService.getDroplet(apiKey, server.externalId)
 			if (resp.success) {
 				if(resp.data?.status == "active") {
-					rtn.success = true
-					rtn.data = dropletToProvisionResponse(resp.data)
-					pending = false
+					// networks can lag behind the active status, keep polling until the public ip is assigned
+					def details = dropletToProvisionResponse(resp.data)
+					if(details.publicIp) {
+						rtn.success = true
+						rtn.data = details
+						pending = false
+					} else {
+						rtn.msg = "Droplet is active but has no public ip address"
+					}
 				} else if(resp.msg == 'failed') {
 					rtn.msg = resp.msg
 					pending = false
@@ -917,6 +923,10 @@ class DigitalOceanProvisionProvider extends AbstractProvisionProvider implements
 		}
 
 		return rtn
+	}
+
+	protected Long getPollIntervalMs() {
+		return 1000l * 20l
 	}
 
 	ServiceResponse<ProvisionResponse> powerOffServer(String apiKey, String dropletId, DigitalOceanApiService apiService=null) {

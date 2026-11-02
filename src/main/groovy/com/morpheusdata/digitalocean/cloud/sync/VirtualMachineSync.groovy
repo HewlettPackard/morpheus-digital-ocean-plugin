@@ -130,7 +130,9 @@ class VirtualMachineSync {
 					}
 					def publicIpAddress = cloudItem.networks.v4?.find { it.type == "public" }?.ip_address
 					if(currentServer.externalIp != publicIpAddress) {
-						if(currentServer.externalIp == currentServer.sshHost) {
+						// a server first synced with only its private ip must move to the public ip once it appears
+						def privateOnlySshHost = publicIpAddress && !currentServer.externalIp && currentServer.sshHost == currentServer.internalIp
+						if(currentServer.externalIp == currentServer.sshHost || privateOnlySshHost) {
 							if(publicIpAddress) {
 								currentServer.sshHost = publicIpAddress
 							} else if(powerState == ComputeServer.PowerState.off) {
