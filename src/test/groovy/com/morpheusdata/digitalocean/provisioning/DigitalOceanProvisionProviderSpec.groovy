@@ -398,6 +398,7 @@ class DigitalOceanProvisionProviderSpec extends Specification {
 		resp.success == true
 		resp.data.publicIp == '142.93.243.111'
 		resp.data.privateIp == '10.116.32.6'
+		resp.msg == null
 	}
 
 	void "getServerDetails fails when the active droplet never gets a public ip"() {

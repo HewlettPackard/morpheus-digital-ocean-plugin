@@ -907,6 +907,7 @@ class DigitalOceanProvisionProvider extends AbstractProvisionProvider implements
 					if(details.publicIp) {
 						rtn.success = true
 						rtn.data = details
+						rtn.msg = null
 						pending = false
 					} else {
 						rtn.msg = "Droplet is active but has no public ip address"
