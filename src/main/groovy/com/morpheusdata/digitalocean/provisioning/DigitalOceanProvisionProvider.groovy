@@ -580,7 +580,7 @@ class DigitalOceanProvisionProvider extends AbstractProvisionProvider implements
 
 	@Override
 	ServiceResponse finalizeWorkload(Workload workload) {
-		DigitalOceanApiService apiService = new DigitalOceanApiService()
+		DigitalOceanApiService apiService = this.apiService ?: new DigitalOceanApiService()
 		ServiceResponse rtn = ServiceResponse.prepare()
 		log.debug("finalizeWorkload: ${workload?.id}")
 		try {
@@ -597,7 +597,7 @@ class DigitalOceanProvisionProvider extends AbstractProvisionProvider implements
 					server.internalIp = privateIp
 					doSave = true
 				}
-				if(serverDetails.data.publicIp != publicIp) {
+				if(server.externalIp != publicIp) {
 					server.externalIp = publicIp
 					doSave = true
 				}
@@ -606,6 +606,14 @@ class DigitalOceanProvisionProvider extends AbstractProvisionProvider implements
 					morpheusContext.computeServer.save([server]).blockingGet()
 				}
 				rtn.success = true
+			} else if(serverDetails.success != true) {
+				rtn.success = false
+				rtn.msg = serverDetails.msg ?: "Unable to get details for droplet ${server.externalId}".toString()
+				log.warn("Failed to finalize server ${server.id}: ${rtn.msg}")
+			} else {
+				rtn.success = false
+				rtn.msg = "Droplet ${server.externalId} has no public IP address".toString()
+				log.warn("Failed to finalize server ${server.id}: ${rtn.msg}")
 			}
 		} catch(e) {
 			rtn.success = false
@@ -737,7 +745,7 @@ class DigitalOceanProvisionProvider extends AbstractProvisionProvider implements
 
 	@Override
 	ServiceResponse finalizeHost(ComputeServer server) {
-		DigitalOceanApiService apiService = new DigitalOceanApiService()
+		DigitalOceanApiService apiService = this.apiService ?: new DigitalOceanApiService()
 		ServiceResponse rtn = ServiceResponse.prepare()
 		log.debug("finalizeHost: ${server?.id}")
 		try {
@@ -753,7 +761,7 @@ class DigitalOceanProvisionProvider extends AbstractProvisionProvider implements
 					server.internalIp = privateIp
 					doSave = true
 				}
-				if(serverDetails.externalIp != publicIp) {
+				if(server.externalIp != publicIp) {
 					server.externalIp = publicIp
 					doSave = true
 				}
@@ -762,6 +770,14 @@ class DigitalOceanProvisionProvider extends AbstractProvisionProvider implements
 					morpheusContext.computeServer.save([server]).blockingGet()
 				}
 				rtn.success = true
+			} else if(serverDetails.success != true) {
+				rtn.success = false
+				rtn.msg = serverDetails.msg ?: "Unable to get details for droplet ${server.externalId}".toString()
+				log.warn("Failed to finalize server ${server.id}: ${rtn.msg}")
+			} else {
+				rtn.success = false
+				rtn.msg = "Droplet ${server.externalId} has no public IP address".toString()
+				log.warn("Failed to finalize server ${server.id}: ${rtn.msg}")
 			}
 		} catch(e) {
 			rtn.success = false
@@ -886,7 +902,10 @@ class DigitalOceanProvisionProvider extends AbstractProvisionProvider implements
 		return this.plugin
 	}
 
-	@Override
+	protected DigitalOceanApiService apiService
+	protected Long serverPollIntervalMs = 20000l
+	protected Integer serverPollMaxAttempts = 16
+
 	ServiceResponse<ProvisionResponse> getServerDetails(ComputeServer server, DigitalOceanApiService apiService=null) {
 		apiService = apiService ?: new DigitalOceanApiService()
 		log.debug("getServerDetails: $server.id")
@@ -895,24 +914,35 @@ class DigitalOceanProvisionProvider extends AbstractProvisionProvider implements
 
 		Boolean pending = true
 		Integer attempts = 0
+		String lastError = null
+		String lastStatus = null
 		while (pending) {
 			log.debug("getServerDetails attempt $attempts")
-			sleep(1000l * 20l)
+			sleep(serverPollIntervalMs)
 			def resp = apiService.getDroplet(apiKey, server.externalId)
 			if (resp.success) {
-				if(resp.data?.status == "active") {
+				lastStatus = resp.data?.status
+				if(lastStatus == "active") {
 					rtn.success = true
 					rtn.data = dropletToProvisionResponse(resp.data)
 					pending = false
-				} else if(resp.msg == 'failed') {
-					rtn.msg = resp.msg
+				} else if(lastStatus in ['errored', 'archive']) {
+					rtn.msg = "Droplet ${server.externalId} entered status '${lastStatus}'".toString()
 					pending = false
 				}
+			} else {
+				lastError = resp.msg ?: resp.results?.message ?: resp.errorCode
+				log.warn("getServerDetails: error getting droplet ${server.externalId} (attempt ${attempts}): ${lastError}")
 			}
 			attempts++
-			if (attempts > 15) {
+			if (pending && attempts >= serverPollMaxAttempts) {
 				pending = false
+				rtn.msg = "Timed out waiting for droplet ${server.externalId} to become active after ${attempts} attempts (last status: ${lastStatus ?: 'unknown'}${lastError ? ', last error: ' + lastError : ''})".toString()
 			}
+		}
+
+		if (!rtn.success) {
+			log.warn("getServerDetails: ${rtn.msg}")
 		}
 
 		return rtn

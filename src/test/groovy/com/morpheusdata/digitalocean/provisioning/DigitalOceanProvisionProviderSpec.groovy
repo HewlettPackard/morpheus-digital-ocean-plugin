@@ -364,6 +364,55 @@ class DigitalOceanProvisionProviderSpec extends Specification {
 		resp.success == false
 	}
 
+	void "getServerDetails - timeout reports a reason"() {
+		given:
+		Cloud cloud = new Cloud(name: 'Digital Ocean', configMap: [apiKey: 'abc123'])
+		ComputeServer computeServer = new ComputeServer(id: 1, name: 'serv1', externalId: 'drop1111', cloud: cloud)
+		provider.serverPollIntervalMs = 0l
+		provider.serverPollMaxAttempts = 3
+
+		when:
+		def resp = provider.getServerDetails(computeServer, apiService)
+
+		then:
+		3 * apiService.getDroplet('abc123', 'drop1111') >> new ServiceResponse(success: true, data: [id: 'drop1111', status: 'new'])
+		resp.success == false
+		resp.msg.contains('Timed out')
+		resp.msg.contains('drop1111')
+	}
+
+	void "getServerDetails - errored droplet reports status"() {
+		given:
+		Cloud cloud = new Cloud(name: 'Digital Ocean', configMap: [apiKey: 'abc123'])
+		ComputeServer computeServer = new ComputeServer(id: 1, name: 'serv1', externalId: 'drop1111', cloud: cloud)
+		provider.serverPollIntervalMs = 0l
+
+		when:
+		def resp = provider.getServerDetails(computeServer, apiService)
+
+		then:
+		1 * apiService.getDroplet('abc123', 'drop1111') >> new ServiceResponse(success: true, data: [id: 'drop1111', status: 'errored'])
+		resp.success == false
+		resp.msg.contains('errored')
+	}
+
+	void "finalizeWorkload - failure includes a message"() {
+		given:
+		Cloud cloud = new Cloud(name: 'Digital Ocean', configMap: [apiKey: 'abc123'])
+		ComputeServer computeServer = new ComputeServer(id: 1, name: 'serv1', externalId: 'drop1111', cloud: cloud)
+		Workload workload = new Workload(id: 2, server: computeServer)
+		provider.serverPollIntervalMs = 0l
+		provider.serverPollMaxAttempts = 1
+
+		when:
+		def resp = provider.finalizeWorkload(workload)
+
+		then:
+		1 * apiService.getDroplet('abc123', 'drop1111') >> new ServiceResponse(success: false, msg: 'rate limited')
+		resp.success == false
+		resp.msg.contains('rate limited')
+	}
+
 	void "optionTypes"() {
 		when:
 		def options = provider.optionTypes
