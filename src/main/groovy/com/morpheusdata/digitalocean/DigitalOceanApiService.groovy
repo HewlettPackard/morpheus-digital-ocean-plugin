@@ -171,6 +171,7 @@ class DigitalOceanApiService {
 		} else {
 			rtn.success = false
 			rtn.errorCode = response.errorCode
+			rtn.msg = response.msg ?: response.getError()
 			rtn.results = response.data
 		}
 
