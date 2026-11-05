@@ -423,4 +423,69 @@ class DigitalOceanProvisionProviderSpec extends Specification {
 		resp.privateIp == '192.168.0.10'
 	}
 
+	void "getServerDetails waits for the public ip when the active droplet only has a private ip"() {
+		given:
+		provider = new DigitalOceanProvisionProvider(new DigitalOceanPlugin(), context) {
+			@Override
+			protected Long getPollIntervalMs() { 0l }
+		}
+		ComputeServer server = new ComputeServer(id: 1l, externalId: 'drop1111', cloud: new Cloud(configMap: [apiKey: 'abc123']))
+		def privateOnly = [id: 'drop1111', status: 'active', networks: [v4: [[ip_address: '10.116.32.6', type: 'private']]]]
+		def noNetworks = [id: 'drop1111', status: 'active', networks: [v4: []]]
+		def complete = [id: 'drop1111', status: 'active', networks: [v4: [
+			[ip_address: '10.116.32.6', type: 'private'], [ip_address: '142.93.243.111', type: 'public']]]]
+
+		when:
+		def resp = provider.getServerDetails(server, apiService)
+
+		then:
+		3 * apiService.getDroplet('abc123', 'drop1111') >>> [
+			new ServiceResponse(success: true, data: noNetworks),
+			new ServiceResponse(success: true, data: privateOnly),
+			new ServiceResponse(success: true, data: complete)
+		]
+		resp.success == true
+		resp.data.publicIp == '142.93.243.111'
+		resp.data.privateIp == '10.116.32.6'
+		resp.msg == null
+	}
+
+	void "getServerDetails fails when the active droplet never gets a public ip"() {
+		given:
+		provider = new DigitalOceanProvisionProvider(new DigitalOceanPlugin(), context) {
+			@Override
+			protected Long getPollIntervalMs() { 0l }
+		}
+		ComputeServer server = new ComputeServer(id: 1l, externalId: 'drop1111', cloud: new Cloud(configMap: [apiKey: 'abc123']))
+		def privateOnly = [id: 'drop1111', status: 'active', networks: [v4: [[ip_address: '10.116.32.6', type: 'private']]]]
+
+		when:
+		def resp = provider.getServerDetails(server, apiService)
+
+		then:
+		_ * apiService.getDroplet('abc123', 'drop1111') >> new ServiceResponse(success: true, data: privateOnly)
+		resp.success == false
+	}
+
+	void "finalizeWorkload saves the public and private ips"() {
+		given:
+		provider = new DigitalOceanProvisionProvider(new DigitalOceanPlugin(), context) {
+			@Override
+			ServiceResponse getServerDetails(ComputeServer server, DigitalOceanApiService api) {
+				new ServiceResponse(success: true, data: new com.morpheusdata.response.ProvisionResponse(publicIp: '142.93.243.111', privateIp: '10.116.32.6'))
+			}
+		}
+		ComputeServer server = new ComputeServer(id: 1l, cloud: new Cloud())
+		Workload workload = new Workload(server: server)
+
+		when:
+		def resp = provider.finalizeWorkload(workload)
+
+		then:
+		1 * computeServerContext.save([server]) >> Single.just(true)
+		resp.success == true
+		server.externalIp == '142.93.243.111'
+		server.internalIp == '10.116.32.6'
+	}
+
 }

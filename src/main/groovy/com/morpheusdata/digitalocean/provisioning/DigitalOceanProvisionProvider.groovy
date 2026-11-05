@@ -904,7 +904,6 @@ class DigitalOceanProvisionProvider extends AbstractProvisionProvider implements
 	}
 
 	protected DigitalOceanApiService apiService
-	protected Long serverPollIntervalMs = 20000l
 	protected Integer serverPollMaxAttempts = 16
 
 	ServiceResponse<ProvisionResponse> getServerDetails(ComputeServer server, DigitalOceanApiService apiService=null) {
@@ -919,14 +918,21 @@ class DigitalOceanProvisionProvider extends AbstractProvisionProvider implements
 		String lastStatus = null
 		while (pending) {
 			log.debug("getServerDetails attempt $attempts")
-			sleep(serverPollIntervalMs)
+			sleep(getPollIntervalMs())
 			def resp = apiService.getDroplet(apiKey, server.externalId)
 			if (resp.success) {
 				lastStatus = resp.data?.status
 				if(lastStatus == "active") {
-					rtn.success = true
-					rtn.data = dropletToProvisionResponse(resp.data)
-					pending = false
+					// networks can lag behind the active status, keep polling until the public ip is assigned
+					def details = dropletToProvisionResponse(resp.data)
+					if(details.publicIp) {
+						rtn.success = true
+						rtn.data = details
+						rtn.msg = null
+						pending = false
+					} else {
+						rtn.msg = "Droplet is active but has no public ip address"
+					}
 				} else if(lastStatus in ['errored', 'archive']) {
 					rtn.msg = "Droplet ${server.externalId} entered status '${lastStatus}'".toString()
 					pending = false
@@ -947,6 +953,10 @@ class DigitalOceanProvisionProvider extends AbstractProvisionProvider implements
 		}
 
 		return rtn
+	}
+
+	protected Long getPollIntervalMs() {
+		return 1000l * 20l
 	}
 
 	ServiceResponse<ProvisionResponse> powerOffServer(String apiKey, String dropletId, DigitalOceanApiService apiService=null) {
