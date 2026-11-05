@@ -29,6 +29,7 @@ import com.morpheusdata.core.providers.ProvisionProvider
 import com.morpheusdata.digitalocean.cloud.sync.VPCSync
 import com.morpheusdata.digitalocean.cloud.sync.VirtualMachineSync
 import com.morpheusdata.model.*
+import com.morpheusdata.request.FilterServicePlansCriteria
 import com.morpheusdata.request.ValidateCloudRequest
 import com.morpheusdata.response.ServiceResponse
 import groovy.util.logging.Slf4j
@@ -81,6 +82,18 @@ class DigitalOceanCloudProvider implements CloudProvider {
 	@Override
 	String getDefaultProvisionTypeCode() {
 		return 'digitalocean-provision-provider'
+	}
+
+	@Override
+	Collection<ServicePlan> filterServicePlans(Cloud cloud, Collection<ServicePlan> servicePlans, FilterServicePlansCriteria criteria) {
+		String region = cloud?.configMap?.datacenter
+		if(!region) {
+			return servicePlans
+		}
+		// plans without synced region data pass through until the next refresh populates them
+		return servicePlans.findAll { ServicePlan plan ->
+			!plan.code?.startsWith(SizesSync.SIZE_PREFIX) || plan.subRegionCodes == null || plan.subRegionCodes.contains(region)
+		}
 	}
 
 	@Override
@@ -299,8 +312,8 @@ class DigitalOceanCloudProvider implements CloudProvider {
 	}
 
 	@Override
-	ServiceResponse validate(Cloud cloud, ValidateCloudRequest validateCloudRequest) {
-		DigitalOceanApiService apiService = new DigitalOceanApiService()
+	ServiceResponse validate(Cloud cloud, ValidateCloudRequest validateCloudRequest, DigitalOceanApiService apiService=null) {
+		apiService = apiService ?: new DigitalOceanApiService()
 		log.debug("validating Cloud: ${cloud.code}, ${validateCloudRequest.credentialType} ${validateCloudRequest.credentialUsername} ${validateCloudRequest.credentialPassword}")
 		if (!cloud.configMap.datacenter) {
 			return new ServiceResponse(success: false, msg: 'Choose a datacenter')
@@ -337,8 +350,8 @@ class DigitalOceanCloudProvider implements CloudProvider {
 	}
 
 	@Override
-	ServiceResponse initializeCloud(Cloud cloud) {
-		DigitalOceanApiService apiService = new DigitalOceanApiService()
+	ServiceResponse initializeCloud(Cloud cloud, DigitalOceanApiService apiService=null) {
+		apiService = apiService ?: new DigitalOceanApiService()
 		ServiceResponse serviceResponse
 		log.debug("Initializing Cloud: ${cloud.code}")
 		log.debug("config: ${cloud.configMap}")
