@@ -114,8 +114,11 @@ class DigitalOceanOptionSourceProvider implements OptionSourceProvider {
 			log.debug("VPCs not cached, loading from API")
 			DigitalOceanApiService apiService = new DigitalOceanApiService()
 
-			if(paramsApiKey) {
-				ServiceResponse response = apiService.listVpcs(paramsApiKey, datacenter)
+			// the form sends a masked placeholder for the API key in edit mode, so fall back to the cloud's stored key
+			String apiKeyForLookup = (cloud && paramsApiKey?.startsWith("******")) ? plugin.getAuthConfig(cloud).doApiKey : paramsApiKey
+
+			if(apiKeyForLookup) {
+				ServiceResponse response = apiService.listVpcs(apiKeyForLookup, datacenter)
 				if(response.success) {
 					vpcs = []
 					response.data.each {
