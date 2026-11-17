@@ -30,13 +30,13 @@ resource "compute-type-layout" "kubernetes-1_36-ubuntu-24_04-digitalocean-amd64-
   specTemplates = []
   packages = [
     "kubernetes-calico-3-32-1-package",
-    "kubernetes-prometheus-0-18-package"
+    "kubernetes-prometheus-0-18-package",
+    "kubernetes-gateway-api-1-6-1-package"
   ]
   optionalPackages = [
     "kubernetes-envoy-gateway-1-8-controller-package",
     "kubernetes-rook-1-20-7-with-autoscaler-package",
-    "kubernetes-fluentbit-5-1-package",
-    "kubernetes-gateway-api-1-6-1-package"
+    "kubernetes-fluentbit-5-1-package"
   ]
 }
 
@@ -72,13 +72,13 @@ resource "compute-type-layout" "kubernetes-1_36-ubuntu-24_04-digitalocean-amd64"
   specTemplates = []
   packages = [
     "kubernetes-calico-3-32-1-package",
-    "kubernetes-prometheus-0-18-package"
+    "kubernetes-prometheus-0-18-package",
+    "kubernetes-gateway-api-1-6-1-package"
   ]
   optionalPackages = [
     "kubernetes-envoy-gateway-1-8-controller-package",
     "kubernetes-rook-1-20-7-with-autoscaler-package",
-    "kubernetes-fluentbit-5-1-package",
-    "kubernetes-gateway-api-1-6-1-package"
+    "kubernetes-fluentbit-5-1-package"
   ]
 }
 
@@ -114,13 +114,13 @@ resource "compute-type-layout" "kubernetes-1_35-ubuntu-24_04-digitalocean-amd64-
   specTemplates = []
   packages = [
     "kubernetes-calico-3-32-1-package",
-    "kubernetes-prometheus-0-18-package"
+    "kubernetes-prometheus-0-18-package",
+    "kubernetes-gateway-api-1-6-1-package"
   ]
   optionalPackages = [
     "kubernetes-envoy-gateway-1-8-controller-package",
     "kubernetes-rook-1-20-7-with-autoscaler-package",
-    "kubernetes-fluentbit-5-1-package",
-    "kubernetes-gateway-api-1-6-1-package"
+    "kubernetes-fluentbit-5-1-package"
   ]
 }
 
@@ -156,13 +156,13 @@ resource "compute-type-layout" "kubernetes-1_35-ubuntu-24_04-digitalocean-amd64"
   specTemplates = []
   packages = [
     "kubernetes-calico-3-32-1-package",
-    "kubernetes-prometheus-0-18-package"
+    "kubernetes-prometheus-0-18-package",
+    "kubernetes-gateway-api-1-6-1-package"
   ]
   optionalPackages = [
     "kubernetes-envoy-gateway-1-8-controller-package",
     "kubernetes-rook-1-20-7-with-autoscaler-package",
-    "kubernetes-fluentbit-5-1-package",
-    "kubernetes-gateway-api-1-6-1-package"
+    "kubernetes-fluentbit-5-1-package"
   ]
 }
 
@@ -198,13 +198,13 @@ resource "compute-type-layout" "kubernetes-1_34-ubuntu-24_04-digitalocean-amd64-
   specTemplates = []
   packages = [
     "kubernetes-calico-3-32-1-package",
-    "kubernetes-prometheus-0-18-package"
+    "kubernetes-prometheus-0-18-package",
+    "kubernetes-gateway-api-1-6-1-package"
   ]
   optionalPackages = [
     "kubernetes-envoy-gateway-1-8-controller-package",
     "kubernetes-rook-1-20-7-with-autoscaler-package",
-    "kubernetes-fluentbit-5-1-package",
-    "kubernetes-gateway-api-1-6-1-package"
+    "kubernetes-fluentbit-5-1-package"
   ]
 }
 
@@ -240,13 +240,13 @@ resource "compute-type-layout" "kubernetes-1_34-ubuntu-24_04-digitalocean-amd64"
   specTemplates = []
   packages = [
     "kubernetes-calico-3-32-1-package",
-    "kubernetes-prometheus-0-18-package"
+    "kubernetes-prometheus-0-18-package",
+    "kubernetes-gateway-api-1-6-1-package"
   ]
   optionalPackages = [
     "kubernetes-envoy-gateway-1-8-controller-package",
     "kubernetes-rook-1-20-7-with-autoscaler-package",
-    "kubernetes-fluentbit-5-1-package",
-    "kubernetes-gateway-api-1-6-1-package"
+    "kubernetes-fluentbit-5-1-package"
   ]
 }
 
